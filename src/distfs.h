@@ -312,6 +312,17 @@ int distfs_net_rpc(struct distfs_cluster *cluster, enum distfs_cmd cmd,
 int distfs_proc_init(struct distfs_context *ctx);
 void distfs_proc_exit(struct distfs_context *ctx);
 
+/* sync.c - Multi-host device synchronization */
+int distfs_sync_init(struct distfs_context *ctx);
+void distfs_sync_exit(void);
+int distfs_sync_now(struct distfs_context *ctx);
+int distfs_sync_handle_device_created(struct distfs_context *ctx,
+				      const char *name, u64 size,
+				      u32 chunk_size, u32 replicas,
+				      u64 device_id);
+int distfs_sync_handle_device_deleted(struct distfs_context *ctx,
+				      const char *name);
+
 /* Utility functions */
 static inline u64 distfs_offset_to_chunk_id(u64 offset, u32 chunk_size)
 {

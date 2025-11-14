@@ -16,53 +16,107 @@ DistFS-KVM is a distributed block device driver that provides replicated, high-a
 
 ## Architecture
 
+### Multi-Host Distributed Architecture
+
+DistFS-KVM creates block devices that span multiple physical hosts. Any KVM host in the cluster can access any device, enabling seamless VM live migration.
+
 ```
-┌──────────────────────────────────────────────────┐
-│           KVM/QEMU Virtual Machine               │
-│                                                  │
-│   ┌──────────────────────────────────────────┐   │
-│   │  Guest OS (sees /dev/vda, /dev/vdb, etc) │   │
-│   └────────────────┬─────────────────────────┘   │
-│                    │ virtio-blk                   │
-└────────────────────┼──────────────────────────────┘
-                     │
-┌────────────────────▼──────────────────────────────┐
-│              Host Linux Kernel                    │
-│                                                   │
-│  ┌──────────────────────────────────────────┐    │
-│  │   /dev/distfs-0, /dev/distfs-1, ...      │    │
-│  │   (Block devices for VMs)                │    │
-│  └────────────────┬─────────────────────────┘    │
-│  ┌────────────────▼─────────────────────────┐    │
-│  │     DistFS-KVM Kernel Module             │    │
-│  │  ┌────────────────────────────────────┐  │    │
-│  │  │  Block Device Layer (blk-mq)       │  │    │
-│  │  └───────────┬────────────────────────┘  │    │
-│  │  ┌───────────▼────────────────────────┐  │    │
-│  │  │  Chunk Manager & Replication       │  │    │
-│  │  └───────────┬────────────────────────┘  │    │
-│  │  ┌───────────▼────────────────────────┐  │    │
-│  │  │  Network Layer (cluster comm)      │  │    │
-│  │  └────────────────────────────────────┘  │    │
-│  └──────────────────────────────────────────┘    │
-└───────────────────┬───────────────────────────────┘
-                    │ Network (TCP/IP)
-        ┌───────────┼───────────┐
-        │           │           │
-┌───────▼────┐ ┌───▼──────┐ ┌──▼───────┐
-│  Storage   │ │ Storage  │ │ Storage  │
-│  Node 1    │ │  Node 2  │ │  Node 3  │
-│            │ │          │ │          │
-│  Chunks    │ │ Chunks   │ │ Chunks   │
-│  (replica) │ │ (replica)│ │ (replica)│
-└────────────┘ └──────────┘ └──────────┘
+┌─────────────────────────── DISTRIBUTED CLUSTER ───────────────────────────┐
+│                                                                            │
+│  ┌─────────────────────┐    ┌─────────────────────┐    ┌────────────────┐│
+│  │   KVM Host 1        │    │   KVM Host 2        │    │   KVM Host 3   ││
+│  │                     │    │                     │    │                ││
+│  │ ┌─────────────────┐ │    │ ┌─────────────────┐ │    │ ┌────────────┐ ││
+│  │ │ VM1             │ │    │ │ VM2             │ │    │ │ VM3        │ ││
+│  │ │ /dev/vda        │ │    │ │ /dev/vda        │ │    │ │ /dev/vda   │ ││
+│  │ └────────┬────────┘ │    │ └────────┬────────┘ │    │ └─────┬──────┘ ││
+│  │          │          │    │          │          │    │       │        ││
+│  │ ┌────────▼────────┐ │    │ ┌────────▼────────┐ │    │ ┌─────▼──────┐ ││
+│  │ │ /dev/distfs-0   │ │    │ │ /dev/distfs-1   │ │    │ │/dev/distfs-││
+│  │ │                 │ │    │ │                 │ │    │ │     0      │ ││
+│  │ │ DistFS Module   │ │    │ │ DistFS Module   │ │    │ │ DistFS Mod │ ││
+│  │ └────────┬────────┘ │    │ └────────┬────────┘ │    │ └─────┬──────┘ ││
+│  └──────────┼──────────┘    └──────────┼──────────┘    └───────┼────────┘│
+│             │                          │                        │         │
+│             └──────────────┬───────────┴────────────────────────┘         │
+│                            │ Cluster Network                              │
+│            ┌───────────────┼────────────────────┐                         │
+│            │               │                    │                         │
+│     ┌──────▼──────┐ ┌─────▼──────┐     ┌──────▼──────┐                  │
+│     │  Metadata   │ │  Storage   │     │  Storage    │                   │
+│     │   Server    │ │   Node 1   │ ... │   Node N    │                   │
+│     │             │ │            │     │             │                   │
+│     │ - Volume    │ │ - Chunks:  │     │ - Chunks:   │                   │
+│     │   registry  │ │   0,3,6... │     │   1,4,7...  │                   │
+│     │ - Chunk     │ │ - Replicas │     │ - Replicas  │                   │
+│     │   mapping   │ │            │     │             │                   │
+│     └─────────────┘ └────────────┘     └─────────────┘                   │
+│                                                                            │
+└────────────────────────────────────────────────────────────────────────────┘
+
+Key Features of Multi-Host Design:
+- Single device (e.g., /dev/distfs-0) accessible from ANY KVM host
+- Chunks distributed across storage nodes for performance and redundancy
+- VM can be live-migrated from Host1 → Host2 → Host3 seamlessly
+- Same device name on all hosts (kernel module creates identical mapping)
+- Storage nodes can be separate or co-located with KVM hosts
 ```
 
-## Quick Start
+### How It Works
 
-### 1. Build and Install
+1. **Device Creation**: Create a device once via any host:
+   ```bash
+   # On any KVM host in cluster
+   sudo distfs-kvm create -n vm1-disk -s 50G -r 3
+   ```
+
+2. **Automatic Availability**: Device appears on ALL KVM hosts:
+   ```bash
+   # On KVM Host 1
+   ls /dev/distfs-0  # ✓ Available
+
+   # On KVM Host 2
+   ls /dev/distfs-0  # ✓ Available (same device!)
+
+   # On KVM Host 3
+   ls /dev/distfs-0  # ✓ Available (same device!)
+   ```
+
+3. **Data Distribution**: Chunks spread across storage nodes:
+   ```
+   Device: vm1-disk (50GB)
+   ├─ Chunk 0 → Storage Nodes [1, 2, 3]
+   ├─ Chunk 1 → Storage Nodes [2, 3, 4]
+   ├─ Chunk 2 → Storage Nodes [3, 4, 1]
+   └─ ... (chunks distributed with replicas)
+   ```
+
+4. **Live Migration**:
+   ```bash
+   # VM running on Host 1 using /dev/distfs-0
+   virsh migrate --live vm1 qemu+ssh://host2/system
+   # VM now on Host 2, still using /dev/distfs-0 (same data!)
+   ```
+
+## Quick Start - Multi-Host Cluster
+
+### Cluster Topology Example
+
+```
+Cluster Network: 192.168.1.0/24
+
+┌──────────────────┬──────────────────┬──────────────────┐
+│  192.168.1.10    │  192.168.1.20    │  192.168.1.30    │
+│  Metadata Server │  KVM Host 1      │  KVM Host 2      │
+│  + Storage       │  + Storage       │  + Storage       │
+└──────────────────┴──────────────────┴──────────────────┘
+```
+
+### 1. Build and Install (on ALL KVM hosts)
 
 ```bash
+# On each KVM host (192.168.1.20, 192.168.1.30, etc.)
+
 # Build the kernel module
 make
 
@@ -70,48 +124,116 @@ make
 sudo make install
 sudo depmod -a
 
-# Load the module
-sudo modprobe distfs-kvm
+# Load the module pointing to metadata server
+sudo modprobe distfs-kvm metadata_server=192.168.1.10:7001
+
+# Verify module loaded
+lsmod | grep distfs_kvm
+dmesg | tail -20
 ```
 
 ### 2. Start Cluster Services
 
+**On Metadata Server (192.168.1.10):**
 ```bash
-# On metadata server (one node)
+# Start metadata service
 sudo distfs-kvmd --role metadata --bind 0.0.0.0:7001
 
-# On storage nodes (multiple nodes)
+# Also run storage on this node
+sudo distfs-kvmd --role storage \
+  --metadata 127.0.0.1:7001 \
+  --storage-path /var/lib/distfs-kvm
+```
+
+**On KVM Host 1 (192.168.1.20):**
+```bash
+# Start storage service (co-located with KVM)
 sudo distfs-kvmd --role storage \
   --metadata 192.168.1.10:7001 \
   --storage-path /var/lib/distfs-kvm
 ```
 
-### 3. Create a Block Device for VM
-
+**On KVM Host 2 (192.168.1.30):**
 ```bash
-# Create a 20GB block device
-sudo distfs-kvm create --name vm1-disk --size 20G --replicas 3
-
-# Block device appears at /dev/distfs-0
-ls -l /dev/distfs-*
+# Start storage service (co-located with KVM)
+sudo distfs-kvmd --role storage \
+  --metadata 192.168.1.10:7001 \
+  --storage-path /var/lib/distfs-kvm
 ```
 
-### 4. Use with KVM/QEMU
+### 3. Create Block Devices (from ANY host)
 
+```bash
+# Create device from KVM Host 1 (or any host)
+sudo distfs-kvm create --name web-vm-disk --size 20G --replicas 3
+
+# Device automatically appears on ALL hosts!
+
+# On Host 1:
+ls -l /dev/distfs-0  # ✓ Available
+
+# On Host 2:
+ls -l /dev/distfs-0  # ✓ Available (same device!)
+
+# Create more devices
+sudo distfs-kvm create --name db-vm-disk --size 100G --replicas 3
+# Now /dev/distfs-1 available on all hosts
+```
+
+### 4. Use with VMs on Any Host
+
+**On KVM Host 1 - Start a VM:**
 ```bash
 # Use the block device with QEMU
 qemu-system-x86_64 \
+  -name web-vm \
   -drive file=/dev/distfs-0,format=raw,if=virtio \
   -m 2048 \
   -smp 2 \
   -enable-kvm
 
-# Or with libvirt (edit VM XML)
-<disk type='block' device='disk'>
-  <driver name='qemu' type='raw' cache='none' io='native'/>
-  <source dev='/dev/distfs-0'/>
-  <target dev='vda' bus='virtio'/>
-</disk>
+# Or with libvirt
+virsh define web-vm.xml
+virsh start web-vm
+```
+
+**On KVM Host 2 - Start another VM:**
+```bash
+# Use different device
+qemu-system-x86_64 \
+  -name db-vm \
+  -drive file=/dev/distfs-1,format=raw,if=virtio \
+  -m 4096 \
+  -smp 4 \
+  -enable-kvm
+```
+
+### 5. Live Migration Between Hosts
+
+```bash
+# VM running on Host 1 using /dev/distfs-0
+
+# Migrate to Host 2 (storage follows automatically!)
+virsh migrate --live web-vm qemu+ssh://192.168.1.30/system
+
+# VM now running on Host 2, still accessing /dev/distfs-0
+# No storage migration needed - same distributed device!
+
+# Can migrate back to Host 1 or to any other host
+virsh migrate --live web-vm qemu+ssh://192.168.1.20/system
+```
+
+### 6. Verify Cluster Status
+
+```bash
+# From any host, check cluster health
+sudo distfs-kvm health
+
+# List all devices (visible from all hosts)
+sudo distfs-kvm list
+
+# View statistics
+cat /proc/distfs-kvm/stats
 ```
 
 ## Why KVM-Specific?

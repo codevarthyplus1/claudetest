@@ -156,11 +156,26 @@ static int __init distfs_init(void)
 		/* Continue anyway, /proc is not critical */
 	}
 
+	/* Initialize device synchronization (multi-host support) */
+	if (distfs_ctx->cluster) {
+		ret = distfs_sync_init(distfs_ctx);
+		if (ret < 0) {
+			distfs_warn("Failed to initialize device sync: %d\n", ret);
+			/* Continue anyway, sync not critical for basic operation */
+		} else {
+			distfs_info("Device synchronization enabled (multi-host mode)\n");
+		}
+	}
+
 	distfs_info("DistFS-KVM initialized successfully\n");
 	distfs_info("  Block device major: %d\n", distfs_ctx->dev_mgr->major);
 	distfs_info("  Max devices: %d\n", distfs_max_devices);
 	distfs_info("  Chunk size: %d bytes\n", distfs_chunk_size);
 	distfs_info("  Max replicas: %d\n", distfs_max_replicas);
+	if (metadata_server)
+		distfs_info("  Multi-host mode: ENABLED (metadata: %s)\n", metadata_server);
+	else
+		distfs_info("  Multi-host mode: DISABLED (standalone)\n");
 
 	return 0;
 
@@ -177,6 +192,9 @@ err_free_ctx:
 static void __exit distfs_exit(void)
 {
 	distfs_info("DistFS-KVM shutting down\n");
+
+	/* Stop device synchronization */
+	distfs_sync_exit();
 
 	/* Remove /proc entries */
 	if (distfs_ctx->proc_dir)

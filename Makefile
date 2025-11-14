@@ -11,7 +11,8 @@ $(MODULE_NAME)-objs := src/main.o \
                        src/chunk.o \
                        src/io.o \
                        src/network.o \
-                       src/proc.o
+                       src/proc.o \
+                       src/sync.o
 
 # Kernel build directory
 KERNEL_DIR ?= /lib/modules/$(shell uname -r)/build
